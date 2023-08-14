@@ -4,7 +4,8 @@ exp_name: 'nerf'
 scene: 'lego'
 
 # module path
-train_dataset_module: lib.datasets.nerf.synthetic 
+train_dataset_module: lib.datasets.nerf.synthetic
+val_dataset_module: lib.datasets.nerf.synthetic 
 test_dataset_module: lib.datasets.nerf.synthetic
 network_module: lib.networks.nerf.network
 loss_module: lib.train.losses.nerf
@@ -49,9 +50,15 @@ train_dataset:
 
 test_dataset:
     data_root: 'data/nerf_synthetic'
+    split: 'val'
+    input_ratio: 0.5
+    cams:: [0, -1, 1]
+
+test_dataset:
+    data_root: 'data/nerf_synthetic'
     split: 'test'
     input_ratio: 0.5
-    cams: [0, -1, 100]
+    cams: [0, -1, 10]
 
 train:
     batch_size: 1
@@ -72,3 +79,5 @@ save_ep: 20
 eval_ep: 20       # 10000 iterations
 save_latest_ep: 5 # 2500 iterations
 log_interval: 10
+result_dir: ''
+vis_dir: ''

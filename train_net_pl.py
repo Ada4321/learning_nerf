@@ -1,4 +1,6 @@
 import os
+from typing import Any, Optional
+from pytorch_lightning.utilities.types import EVAL_DATALOADERS, STEP_OUTPUT
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -6,6 +8,8 @@ from pytorch_lightning import seed_everything
 from lib.config import cfg, args
 from lib.utils.base_utils import load_object
 from os.path import join
+import wandb
+
 
 class plwrapper(pl.LightningModule):
     def __init__(self, cfg, mode='train'):
@@ -13,9 +17,15 @@ class plwrapper(pl.LightningModule):
         super().__init__()
         self.cfg = cfg
         self.network = load_object(cfg.network_module, {})
+
         if mode == 'train':
             self.train_dataset = load_object(cfg.train_dataset_module, cfg.train_dataset)
-        self.network_wrapper = load_object(cfg.loss_module, {'net': self.network})
+            self.val_dataset = load_object(cfg.val_dataset_module, cfg.val_dataset)
+
+        self.network_wrapper = load_object(cfg.loss_module, {'net': self.network})  # loss module
+        
+        self.evaluator = load_object(cfg.evaluator_module, {{'net': self.network}})
+        #self.visualizer = load_object(cfg.visualizer_module, {})
 
     def forward(self, batch):
         # in lightning, forward defines the prediction/inference actions
@@ -23,18 +33,41 @@ class plwrapper(pl.LightningModule):
         self.network.train()
         batch['step'] = self.trainer.global_step
         batch['meta']['step'] = self.trainer.global_step
-        #output = self.test_renderer(batch)
-        #self.visualizer(output, batch)
-        return 0
+        output = self.evaluator(batch)
+        self.visualizer(output, batch)
+        
+        return output
 
     def training_step(self, batch, batch_idx):
+        __import__('ipdb').set_trace()
         batch['step'] = self.trainer.global_step
         batch['meta']['step'] = self.trainer.global_step
         # training_step defines the train loop. It is independent of forward
-        output, loss, loss_stats, image_stats = self.network_wrapper(batch)
+        loss, loss_stats = self.network_wrapper(batch)
         for key, val in loss_stats.items():
             self.log(key, val)
+
         return loss
+    
+    def validation_step(self, batch, batch_idx):
+        __import__('ipdb').set_trace()
+        batch['step'] = self.trainer.global_step
+        batch['meta']['step'] = self.trainer.global_step
+        loss, loss_stats = self.network_wrapper(batch)
+        for key in loss_stats.keys():
+            loss_stats['val_'+key] = loss_stats.pop(key)
+        for key, val in loss_stats.items():
+            self.log(key, val)
+
+        return loss
+    
+    def predict_step(self, batch, batch_idx):
+        __import__('ipdb').set_trace()
+        # TODO:================================
+        return self(batch)
+    
+    def on_predict_epoch_end(self) -> None:
+        return super().on_predict_epoch_end()
 
     def train_dataloader(self):
         from lib.datasets.make_dataset import make_data_sampler, make_batch_data_sampler, make_collator, worker_init_fn
@@ -57,13 +90,14 @@ class plwrapper(pl.LightningModule):
                             worker_init_fn=worker_init_fn)
         return data_loader
 
-    # def val_dataloader(self):
-    #     return DataLoader(
-    #         self.val_dataset,
-    #         batch_size=1,
-    #         shuffle=False,
-    #         num_workers=4,
-    #         pin_memory=True)
+    def val_dataloader(self):
+        from torch.utils.data import DataLoader
+        return DataLoader(
+            self.val_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True)
 
     def configure_optimizers(self):
         from lib.train.optimizer import make_optimizer
@@ -74,6 +108,7 @@ class plwrapper(pl.LightningModule):
 
 def train(cfg):
     model = plwrapper(cfg)
+
     if cfg.resume and os.path.exists(join(cfg.trained_model_dir, 'last.ckpt')):
         resume_from_checkpoint = join(cfg.trained_model_dir, 'last.ckpt')
     else:
@@ -82,7 +117,9 @@ def train(cfg):
             pass
         os.makedirs(cfg.record_dir, exist_ok=True)
         print(cfg, file=open(join(cfg.record_dir, 'exp.yml'), 'w'))
+
     logger = TensorBoardLogger(save_dir=cfg.record_dir, name=cfg.exp_name)
+
     ckpt_callback = pl.callbacks.ModelCheckpoint(
         verbose=True,
         dirpath=cfg.trained_model_dir,
@@ -91,15 +128,19 @@ def train(cfg):
         save_top_k=-1,
         monitor='loss',
         filename="{epoch}")
+    
     # Log true learning rate, serves as LR-Scheduler callback
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')
+
     extra_args = {
         # 'num_nodes': len(cfg.gpus),
         'accelerator': 'gpu',
     }
+
     if len(cfg.gpus) > 0:
         extra_args['strategy'] = 'ddp'
         extra_args['replace_sampler_ddp'] = False
+
     trainer = pl.Trainer(
         gpus=len(cfg.gpus),
         logger=logger,
@@ -146,12 +187,10 @@ def test(cfg):
         renderer = load_object(cfg.renderer_module, cfg.renderer_args, net=network)
     model = plwrapper(cfg, mode=cfg.split)
     ckptpath = join(cfg.trained_model_dir, 'last.ckpt')
-    if os.path.exists(ckptpath):
-        epoch = load_ckpt(model.network, ckptpath)
-    else:
-        myerror('{} not exists'.format(ckptpath))
-        epoch = -1
-    model.step = epoch * 1000
+    assert os.path.exists(ckptpath)
+    epoch = load_ckpt(model.network, ckptpath)
+    
+    model.step = epoch * cfg.ep_iter
     if len(cfg.gpus) == 1:
         pass
         # for key, val in model.network.models.items():print(key, sum([v.numel() for v in val.parameters()]))
@@ -165,10 +204,11 @@ def test(cfg):
     elif cfg.split == 'trainvis':
         dataset = model.train_dataset
         dataset.sample_args.nrays *= 16
+
     ranges = cfg.get('visranges', [0, -1, 1])
     if ranges[1] == -1:
         ranges[1] = len(dataset)
-    sampler = FrameSampler(dataset, ranges)
+    #sampler = FrameSampler(dataset, ranges)
 
     dataloader = torch.utils.data.DataLoader(dataset,
         # sampler=sampler,

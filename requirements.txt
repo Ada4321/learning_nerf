@@ -4,7 +4,7 @@ opencv-python
 imgaug
 lpips
 plyfile
-tensorboardX
 termcolor
 trimesh
 sympy
+wandb
