@@ -9,6 +9,8 @@ from lib.config import cfg, args
 from lib.utils.base_utils import load_object
 from os.path import join
 import wandb
+import numpy as np
+import json
 
 
 class plwrapper(pl.LightningModule):
@@ -34,7 +36,7 @@ class plwrapper(pl.LightningModule):
         batch['step'] = self.trainer.global_step
         batch['meta']['step'] = self.trainer.global_step
         output = self.evaluator(batch)
-        self.visualizer(output, batch)
+        #self.visualizer(output, batch)
         
         return output
 
@@ -63,11 +65,11 @@ class plwrapper(pl.LightningModule):
     
     def predict_step(self, batch, batch_idx):
         __import__('ipdb').set_trace()
-        # TODO:================================
         return self(batch)
     
-    def on_predict_epoch_end(self) -> None:
-        return super().on_predict_epoch_end()
+    def on_predict_epoch_end(self):
+        predictions = self.predict()
+        return {'psnr': np.mean(predictions)}
 
     def train_dataloader(self):
         from lib.datasets.make_dataset import make_data_sampler, make_batch_data_sampler, make_collator, worker_init_fn
@@ -233,6 +235,7 @@ def test(cfg):
             **extra_args
         )
         preds = trainer.predict(model, dataloader)
+        json.dump(preds, open(os.path.join(cfg.result_dir, 'metrics.json'), 'w'))
     elif mode == 2:
         device = torch.device('cuda')
         for batch in dataloader:
