@@ -1,3 +1,6 @@
+import sys
+sys.path.append('/home/zhuhe/codes/learning_nerf')
+
 from typing import Any
 import numpy as np
 from lib.config import cfg
@@ -17,20 +20,26 @@ import json
 class Evaluator:
     def __init__(self, net):
         self.net = net
+        self.img_id = 0
         # os.system('mkdir -p ' + cfg.result_dir)
         # os.system('mkdir -p ' + cfg.result_dir + '/vis')
 
     def evaluate(self, output, batch):
         # assert image number = 1
         H, W = batch['meta']['H'].item(), batch['meta']['W'].item()
-        pred_rgb = output['rgb_map'].reshape(H, W, 3).detach().cpu().numpy()
-        gt_rgb = batch['target'].reshape(H, W, 3).detach().cpu().numpy()
+        pred_rgb = (output['rgb_map']*255.).reshape(H, W, 3).detach().cpu().numpy().astype(np.uint8)
+        gt_rgb = (batch['target']*255.).reshape(H, W, 3).detach().cpu().numpy().astype(np.uint8)
         psnr_item = psnr(gt_rgb, pred_rgb, data_range=1.)
         # self.psnrs.append(psnr_item)
 
         # save predicted rgb
-        save_path = os.path.join(cfg.result_dir, 'vis/res_{}.jpg'.format(self.img_id))
+        save_root = os.path.join(cfg.result_dir, 'vis')
+        if not os.path.exists(save_root):
+            os.makedirs(save_root)
+        save_path = os.path.join(save_root, 'res_{}.jpg'.format(self.img_id))
         imageio.imwrite(save_path, img_utils.horizon_concate(gt_rgb, pred_rgb))
+
+        self.img_id += 1
         
         return psnr_item
 

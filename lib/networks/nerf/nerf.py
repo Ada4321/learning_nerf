@@ -5,8 +5,8 @@ from lib.config import cfg
 
 
 act_dict = {
-    'relu': F.relu(),
-    'sigmoid': F.sigmoid(),
+    'relu': F.relu,
+    'sigmoid': F.sigmoid,
     '': None
 }
 
@@ -15,31 +15,35 @@ class NeRF(nn.Module):
         super(NeRF, self).__init__()
 
         # configurations
-        net_cfg = cfg.network
-        self.W = net_cfg.nerf.W
-        self.D = net_cfg.nerf.D
-        self.V_D = net_cfg.nerf.V_D
-        self.input_dim_xyz = net_cfg.xyz_encoder.input_dim
-        self.input_dim_dir = net_cfg.dir_encoder.input_dim
-        self.freq_xyz = net_cfg.xyz_encoder.freq
-        self.freq_dir = net_cfg.dir_encoder.freq
-        self.skips_xyz = net_cfg.xyz_encoder.skips
-        self.skips_dir = net_cfg.dir_encoder.skips
-        self.act_xyz = net_cfg.xyz_encoder.act
-        self.act_dir = net_cfg.dir_encoder.act
+        nerf_cfg = cfg.network.nerf
+        xyz_cfg = cfg.network.xyz_encoder
+        dir_cfg = cfg.network.dir_encoder
+        self.W = nerf_cfg.W
+        self.D = nerf_cfg.D
+        self.V_D = nerf_cfg.V_D
+        self.input_dim_xyz = xyz_cfg.input_dim
+        self.input_dim_dir = dir_cfg.input_dim
+        self.freq_xyz = xyz_cfg.freq
+        self.freq_dir = dir_cfg.freq
+        self.skips_xyz = xyz_cfg.skips
+        self.skips_dir = dir_cfg.skips
+        self.act_xyz = xyz_cfg.act
+        self.act_dir = dir_cfg.act
+        self.pe_dim_xyz = self.input_dim_xyz * self.freq_xyz * 2
+        self.pe_dim_dir = self.input_dim_dir * self.freq_dir * 2
 
         # positional encoding
         self.pe_xyz = PositionEncoding(self.freq_xyz)
         self.pe_dir = PositionEncoding(self.freq_dir)
 
-        # mlp encoders
-        self.xyz_encoder = self.make_encoder(in_dim=self.input_dim_xyz,
+        # encoders
+        self.xyz_encoder = self.make_encoder(in_dim=self.pe_dim_xyz,
                                              out_dim=self.W+1,
                                              h_dim=self.W,
                                              H=self.D,
                                              skips=self.skips_xyz,
                                              )
-        self.dir_encoder = self.make_encoder(in_dim=self.input_dim_dir+self.W,
+        self.dir_encoder = self.make_encoder(in_dim=self.pe_dim_dir+self.W,
                                              out_dim=3,
                                              h_dim=self.W//2,
                                              H=self.V_D,
@@ -73,7 +77,7 @@ class NeRF(nn.Module):
         if H == 0:
             return nn.ModuleList([nn.Linear(in_dim, out_dim)])
         return nn.ModuleList([nn.Linear(in_dim, h_dim)] + \
-                             [nn.Linear(h_dim, h_dim) if i in skips else nn.Linear(in_dim+h_dim, h_dim) for i in range(H-1)] + \
+                             [nn.Linear(h_dim, h_dim) if i not in skips else nn.Linear(in_dim+h_dim, h_dim) for i in range(H-1)] + \
                              [nn.Linear(h_dim, out_dim)])
 
     def encode(self, encoder, inputs, skips, act):
@@ -93,16 +97,17 @@ class PositionEncoding(nn.Module):
         self.L = L
 
     def forward(self, p):
-        pe_matrix = torch.zeros(p.shape, 2*self.L)
-        powers = torch.pow(2, torch.linspace(0, self.L-1, self.L)).reshape(1, -1)
+        pe_matrix = torch.zeros(*p.shape, 2*self.L, device=p.device)
+        powers = torch.pow(2, torch.linspace(0, self.L-1, self.L)).reshape(1, -1).to(p.device)
         """
         p: (..., input_dim) unsqueeze=> (..., input_dim, 1)
         powers: (1, L)
         ========================>
         pe: (..., input_dim, L)
         """
-        pe = torch.pi * torch.matmul(p.unsqueeze(-1), powers)
+        #pe = torch.pi * torch.matmul(p.unsqueeze(-1), powers)
+        pe = torch.matmul(p.unsqueeze(-1), powers)
         pe_matrix[..., 0::2] = torch.sin(pe)
         pe_matrix[..., 1::2] = torch.cos(pe)
 
-        return pe_matrix.reshape(pe_matrix.shape[:-2], -1)  # pe_matrix: (..., input_dim*2L)
+        return pe_matrix.transpose(1,2).reshape(pe_matrix.shape[0], -1)  # pe_matrix: (..., input_dim*2L)

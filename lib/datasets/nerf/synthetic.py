@@ -7,6 +7,9 @@ import imageio
 import json
 import cv2
 
+import sys
+sys.path.append('/home/zhuhe/codes/learning_nerf')
+sys.path.append('/home/zhuhe/codes/learning_nerf/lib')
 from lib.utils import data_utils
 from lib.config import cfg
 from utils.nerf.nerf_utils import get_rays, get_rays_np
@@ -19,17 +22,22 @@ class Dataset(data.Dataset):
         # dataset configurations
         data_root, split, scene = kwargs['data_root'], kwargs['split'], cfg.scene
         self.input_ratio = kwargs['input_ratio']
-        self.batching_strategy = kwargs['batching_strategy']
+        self.batching_strategy = None
+        if 'batching_strategy' in kwargs:
+            self.batching_strategy = kwargs['batching_strategy']
         self.data_root = os.path.join(data_root, scene)
         self.split = split
-        self.batch_size = cfg.task_args.N_rays
+        self.batch_size = cfg.task_arg.N_rays
         assert kwargs['input_ratio'] == 0.5 or kwargs['input_ratio'] == 1.
         self.half_res = kwargs['input_ratio'] == 0.5
         self.white_bkgd = cfg.task_arg.white_bkgd
 
         # load json information
-        self.json_info = json.load(open(os.path.join(self.data_root, 'transforms_{}'.format(self.split))))
+        self.json_info = json.load(open(os.path.join(self.data_root, 'transforms_{}.json'.format(self.split))))
+        #self.json_info = json.load(open(os.path.join(self.data_root, 'transforms_{}.json'.format('train'))))
         self.frames = self.json_info['frames']
+        if self.split != 'train':
+            self.frames = self.frames[::10]
 
         # load camera rays over the whole dataset
         if self.batching_strategy == 'cross':
@@ -42,37 +50,43 @@ class Dataset(data.Dataset):
         if self.batching_strategy == 'cross':
             assert self.rays_rgb is not None
             return len(self.rays_rgb)
-        return len(cfg.ep_iter)
+        return cfg.ep_iter
         
 
     def __getitem__(self, idx):
         if self.split != "train":
             # load target image and pose
             img_path = os.path.join(self.data_root, self.frames[idx]['file_path'][2:]+'.png')  
-            target_img = imageio.imread(img_path)
-            pose = self.frames[img_idx]['transform_matrix']
+            target_img = (np.array(imageio.v2.imread(img_path)) / 255.).astype(np.float32)
+            pose = np.array(self.frames[idx]['transform_matrix']).astype(np.float32)
             
             # deal with white background
             if self.white_bkgd:
                 target_img = target_img[...,:3] * target_img[...,-1:] + (1 - target_img[...,-1:])
+            else:
+                target_img = target_img[...,:3]
 
             # deal with resolution
-            H, W, C = target_img.shape[:2]     # (H,W,4)
+            H, W, C = target_img.shape     # (H,W,3)
             camera_angle_x = float(self.json_info['camera_angle_x'])
             focal = .5 * W / np.tan(.5 * camera_angle_x)
+            
+            if self.half_res:
+                H = H // 2  # resolution should be integers
+                W = W // 2
+                focal = focal / 2.
+                target_img = cv2.resize(target_img, (W, H), interpolation=cv2.INTER_AREA)  # cv2.INTER_AREA is suitable for image downsamp
+
+            # intrinsics
             K = np.array([
                 [focal, 0, 0.5*W],
                 [0, focal, 0.5*H],
                 [0, 0, 1]
             ])
-            if self.half_res:
-                H = H // 2  # resolution should be integers
-                W = W // 2
-                focal = focal / 2.
-                target_img = cv2.resize(target_img, (self.W, self.H), interpolation=cv2.INTER_AREA)  # cv2.INTER_AREA is suitable for image downsamp
 
             # get camera rays
-            rays_o, rays_d = get_rays_np(H, W, K, pose[:3,:4])
+            rays_d, rays_o = get_rays_np(H, W, K, pose[:3,:4])
+            rays_d, rays_o = rays_d.reshape(-1,3), rays_o.reshape(-1,3)
 
             # return batch
             rays = np.stack([rays_d, rays_o], axis=1)
@@ -94,34 +108,39 @@ class Dataset(data.Dataset):
         
         elif self.batching_strategy == 'within':
             # randomly sample one image from the training set
-            img_idx = np.random.choice(self.__len__())
+            img_idx = np.random.choice(len(self.frames))
 
             # load target image and pose
             img_path = os.path.join(self.data_root, self.frames[img_idx]['file_path'][2:]+'.png')  
-            target_img = imageio.imread(img_path)
-            pose = self.frames[img_idx]['transform_matrix']
+            target_img = (np.array(imageio.v2.imread(img_path)) / 255.).astype(np.float32)
+            pose = np.array(self.frames[img_idx]['transform_matrix']).astype(np.float32)
             
             # deal with white background
             if self.white_bkgd:
                 target_img = target_img[...,:3] * target_img[...,-1:] + (1 - target_img[...,-1:])
+            else:
+                target_img = target_img[...,:3]
 
             # deal with resolution
-            H, W, C = target_img.shape[:2]     # (H,W,4)
+            H, W, C = target_img.shape     # (H,W,4)
             camera_angle_x = float(self.json_info['camera_angle_x'])
             focal = .5 * W / np.tan(.5 * camera_angle_x)
+            
+            if self.half_res:
+                H = H // 2  # resolution should be integers
+                W = W // 2
+                focal = focal / 2.
+                target_img = cv2.resize(target_img, (W, H), interpolation=cv2.INTER_AREA)  # cv2.INTER_AREA is suitable for image downsamp
+
+            # intrinsics
             K = np.array([
                 [focal, 0, 0.5*W],
                 [0, focal, 0.5*H],
                 [0, 0, 1]
             ])
-            if self.half_res:
-                H = H // 2  # resolution should be integers
-                W = W // 2
-                focal = focal / 2.
-                target_img = cv2.resize(target_img, (self.W, self.H), interpolation=cv2.INTER_AREA)  # cv2.INTER_AREA is suitable for image downsamp
 
             # get camera rays
-            rays_o, rays_d = get_rays_np(H, W, K, pose[:3,:4])
+            rays_d, rays_o = get_rays_np(H, W, K, pose[:3,:4])
 
             # sample a batch of rays
             select_inds = np.random.choice(H*W, size=self.batch_size, replace=False)
@@ -133,6 +152,7 @@ class Dataset(data.Dataset):
             rays = np.stack([rays_d, rays_o], axis=1)
             return {'rays': rays,       # (B,2,3)
                     'target': target}   # (B,3)
+
             
 
     def pose_spherical(self, theta, phi, radius):
@@ -192,12 +212,6 @@ class Dataset(data.Dataset):
         self.H, self.W = self.imgs[0][:2]
         self.camera_angle_x = float(self.json_info['camera_angle_x'])
         self.focal = .5 * self.W / np.tan(.5 * self.camera_angle_x)
-        # camera intrinsic
-        self.K = np.array([
-            [self.focal, 0, 0.5*self.W],
-            [0, self.focal, 0.5*self.H],
-            [0, 0, 1]
-        ])
 
         # half res
         if self.half_res:
@@ -207,6 +221,13 @@ class Dataset(data.Dataset):
             for img in self.imgs:
                 # cv2.resize方法先指定W后指定H
                 img = cv2.resize(img, (self.W, self.H), interpolation=cv2.INTER_AREA)  # cv2.INTER_AREA is suitable for image downsamp
+        
+        # camera intrinsics
+        self.K = np.array([
+            [self.focal, 0, 0.5*self.W],
+            [0, self.focal, 0.5*self.H],
+            [0, 0, 1]
+        ])
 
         # render_poses (40,4,4)  TODO: 作用是什么？
         self.render_poses = torch.stack([self.pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,40+1)[:-1]], dim=0)

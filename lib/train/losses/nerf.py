@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+
+import sys
+sys.path.append('/home/zhuhe/codes/learning_nerf')
 from lib.utils import net_utils
 from lib.config import cfg
 
@@ -17,19 +20,21 @@ class NetworkWrapper(nn.Module):
         rgb_map_0 = output['rgb_map_0'] if 'rgb_map_0' in output.keys() else None
         scalar_stats = {}
 
-        loss = self.color_criterion(rgb_map, target)
-        psnr = -10. * torch.log(loss.detach()) / torch.log(torch.Tensor([10.]).to(loss.device))
-        scalar_stats.update({'loss_fine': loss})
-        scalar_stats.update({'psnr_fine': psnr})
+        loss_fine = self.color_criterion(rgb_map.reshape(target.shape), target)
+        psnr_fine = -10. * torch.log(loss_fine.detach()) / torch.log(torch.Tensor([10.]).to(loss_fine.device))
+        scalar_stats.update({'fine_loss': loss_fine})
+        scalar_stats.update({'psnr_fine': psnr_fine})
 
         if rgb_map_0 is not None:
-            loss_0 = self.color_criterion(rgb_map_0, target)
+            loss_0 = self.color_criterion(rgb_map_0.reshape(target.shape), target)
             psnr_0 = -10. * torch.log(loss_0.detach()) / torch.log(torch.Tensor([10.]).to(loss_0.device))
 
-            scalar_stats.update({'loss_coarse': loss_0})
+            scalar_stats.update({'coarse_loss': loss_0})
             scalar_stats.update({'psnr_coarse': psnr_0})
 
-            loss += loss_0
+            loss = loss_fine + loss_0
+        else:
+            loss = loss_fine
 
         scalar_stats.update({'loss': loss})
 

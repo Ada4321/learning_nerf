@@ -70,7 +70,7 @@ cfg.task = 'hello'
 # gpus
 cfg.gpus = list(range(4))
 # if load the pretrained network
-cfg.resume = True
+cfg.resume = False
 
 # epoch
 cfg.ep_iter = -1
@@ -175,7 +175,7 @@ def make_cfg(args):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--cfg_file", default="configs/default.yaml", type=str)
+parser.add_argument("--cfg_file", default="/home/zhuhe/codes/learning_nerf/configs/nerf/nerf.yaml", type=str)
 parser.add_argument('--test', action='store_true', dest='test', default=False)
 parser.add_argument("--type", type=str, default="")
 parser.add_argument('--det', type=str, default='')

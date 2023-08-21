@@ -20,7 +20,7 @@ def get_rays(H, W, K, c2w):
     dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], dim=-1)
 
     rays_d = torch.matmul(c2w[:3,:3], dirs[:,:,:,None]).reshape(dirs.shape)
-    rays_o = torch.broadcast_to(c2w[:3,-1], rays_d)
+    rays_o = torch.broadcast_to(c2w[:3,-1], rays_d.shape)
 
     return rays_d, rays_o
 
@@ -66,6 +66,6 @@ def get_rays_np(H, W, K, c2w):
 
     # compute the origin of all rays in the world frame
     # for every pixel in the same image, the origin of their corresponding rays are the same
-    rays_o = np.broadcast_to(c2w[:3, -1], rays_d)  # (3,) => (H,W,3)
+    rays_o = np.broadcast_to(c2w[:3, -1], rays_d.shape)  # (3,) => (H,W,3)
 
     return rays_d, rays_o

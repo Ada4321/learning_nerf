@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+import sys
+sys.path.append('/home/zhuhe/codes/learning_nerf')
+sys.path.append('/home/zhuhe/codes/learning_nerf/lib')
+sys.path.append('/home/zhuhe/codes/learning_nerf/lib/networks/nerf/')
 from lib.config import cfg
 from nerf import NeRF
 from utils.nerf.nerf_utils import get_rays
@@ -8,7 +13,7 @@ from utils.nerf.nerf_utils import get_rays
 class Network(nn.Module):
     """Wrapping NeRF model and volume rendering blocks
     """
-    def __init__(self, **kwargs):
+    def __init__(self):
         super(Network, self).__init__()
         # configurations ============================================
         task_arg = cfg.task_arg
@@ -24,14 +29,14 @@ class Network(nn.Module):
         # scene bounds
         self.bds_dict = task_arg.scene_bounds
         # stratified sampling
-        self.stratified = task_arg.stratefied
+        self.stratified = task_arg.stratified
 
         # init nerf models(coarse and fine) =========================
         self.model = NeRF()
         self.model_fine = NeRF() if self.cascade_sampling else None
         self.model_dict = {
             'coarse': self.model,
-            'fine': self.fine
+            'fine': self.model_fine
         }
 
     def batchify(self, fn, chunk):
@@ -70,6 +75,8 @@ class Network(nn.Module):
         """
         # create ray batch
         # rays (B,2,3)
+        if rays.ndim == 4:
+            rays = rays.squeeze(0)
         rays_d, rays_o = rays.float().transpose(0,1)  # rays_d (B,3)  rays_o (B,3)
         # get viewdirs
         viewdirs = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)  #(B,3)
@@ -87,7 +94,7 @@ class Network(nn.Module):
 
         return all_ret
 
-    def bathify_rays(self, rays_flat):
+    def batchify_rays(self, rays_flat):
         """Render rays in smaller minibatches to avoid OOM.
         """
         all_ret = {}
@@ -111,24 +118,25 @@ class Network(nn.Module):
         """
         # parsing ray components
         N_rays = rays.shape[0]
-        rays_d, rays_o = rays[:,:3], rays[:,:6]  # (B,3)
-        near, far = rays[:, 6], rays[:, 7]      # (B,)
-        viewdirs = rays[:,-3:]                   # (B,3)
+        rays_d, rays_o = rays[:,:3], rays[:,3:6]  # (B,3)
+        near, far = rays[:, 6], rays[:, 7]        # (B,)
+        viewdirs = rays[:,-3:]                    # (B,3)
 
         # sampling raw points along the rays
         # get bins along z-axis
-        t_vals = torch.linspace(0, 1, self.N_samples).reshape(1,-1)               # (1,N_samples)
-        z_vals = near.reshape(-1,1) * t_vals + far.reshape(-1,1) * (1. - t_vals)  # (B,N_samples)
+        t_vals = torch.linspace(0, 1, self.N_samples, device=rays.device).reshape(1,-1)              # (1,N_samples)
+        z_vals = near.reshape(-1,1) * (1. - t_vals) + far.reshape(-1,1) * t_vals  # (B,N_samples)
         # stratified sampling
         if self.stratified:
-            t_rand = torch.rand(z_vals.shape)                     # (B, N_samples)
-            mid = 0.5 * (z_vals[:-1] + z_vals[1:])                # (B, N_samples-1)
+            t_rand = torch.rand(z_vals.shape, device=rays.device)                     # (B, N_samples)
+            mid = 0.5 * (z_vals[...,:-1] + z_vals[...,1:])                # (B, N_samples-1)
             lower = torch.cat([z_vals[...,:1], mid], dim=-1)      # (B, N_samples)
             upper = torch.cat([mid, z_vals[...,-1:]], dim=-1)     # (B, N_samples)
             z_vals = lower + (upper - lower) * t_rand
         pts = rays_o[:,None] + z_vals[...,None] * rays_d[:,None]  # (B, N_samples, 3)
 
         # prediction of the raw network
+        
         raw = self.query_from_nerf(inputs=pts, viewdirs=viewdirs, sampling_state='coarse')
         rgb_map, disp_map, acc_map, weights, depth_map = self.raw2outputs(raw, z_vals, rays_d)
 
@@ -138,13 +146,13 @@ class Network(nn.Module):
 
             # finer sampling
             z_vals_mid = 0.5 * (z_vals[...,1:] + z_vals[...,:-1])
-            z_samples = self.sample_pdf(z_vals_mid, weights[...,1:-1, self.N_samples_fine]).detach()
+            z_samples = self.sample_pdf(z_vals_mid, weights[...,1:-1], self.N_samples_fine).detach()
 
             z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], dim=-1), dim=-1)
             pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # [N_rays, N_samples + N_importance, 3]
 
             # finer results
-            fine = self.query_from_nerf(pts, viewdirs, 'fine')
+            fine = self.query_from_nerf(inputs=pts, viewdirs=viewdirs, sampling_state='fine')
             rgb_map, disp_map, acc_map, weights, depth_map = self.raw2outputs(fine, z_vals, rays_d)
 
         # return results
@@ -174,28 +182,29 @@ class Network(nn.Module):
             depth_map: [num_rays], estimated distance to object
         """
         density = raws[...,-1]  # [num_rays, num_samples]
+        density_slice = density[density.shape[0]-1]
         rgb = raws[...,:-1]     # [num_rays, num_samples, 3]
 
         # convert density to alpha
         raw2alpha = lambda densiy, dists: 1. - torch.exp(-densiy*dists)
 
         dists = z_vals[...,1:] - z_vals[...,:-1]
-        dists = torch.cat([dists, torch.tensor(1e10).expand(dists[...,:1].shape)], dim=-1)
+        dists = torch.cat([dists, torch.tensor(1e8).expand(dists[...,:1].shape).to(dists.device)], dim=-1)
         dists = dists * torch.norm(rays_d[...,None,:], dim=-1)  # [num_rays, num_samples]
 
         alpha = raw2alpha(density, dists)  # [num_rays, num_samples]
 
         # weights
-        weights = alpha * torch.cumprod(torch.cat([torch.ones(alpha[...,:1].shape), 1.-alpha+1e-10], dim=-1))[...,:-1]
+        weights = alpha * torch.cumprod(torch.cat([torch.ones(alpha[...,:1].shape).to(alpha.device), 1.-alpha+1e-10], dim=-1), dim=-1)[...,:-1]
 
         # output maps
         rgb_map = torch.sum(weights[...,None] * rgb, dim=-2)
         depth_map = torch.sum(weights * z_vals, dim=-1)
         acc_map = torch.sum(weights, dim=-1)
-        disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1)) # the larger the depth, the smaller the disparity
+        disp_map = 1. / torch.max(1e-8 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1)+1e-8) # the larger the depth, the smaller the disparity
 
         if self.white_bkgd:
-            rgb_map = rgb_map + (1. - acc_map)
+            rgb_map = rgb_map + (1. - acc_map.reshape(-1,1))
 
         return rgb_map, disp_map, acc_map, weights, depth_map
 
@@ -208,7 +217,7 @@ class Network(nn.Module):
 
         # Invert CDF
         u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
-        u = u.contiguous()
+        u = u.contiguous().to(bins.device)
         inds = torch.searchsorted(cdf, u, right=True)
         below = torch.max(torch.zeros_like(inds - 1), inds - 1)
         above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
